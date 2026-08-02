@@ -1,20 +1,104 @@
-name: 'Diagnose with Denpex'
-description: 'Automatically analyzes failed ML training jobs and outputs root cause, confidence, and recommended fixes.'
+# Denpex — GitHub Action (INT-04)
+#
+# A drop-in CI/CD gate that runs a Denpex pre-launch check on a GitHub runner.
+# It downloads the single-file Denpex agent (the SAME zero-dependency agent you
+# install on a training node) and runs one of its local, no-network, no-API-key
+# checks. The agent exits non-zero when it finds a blocker, which fails the job
+# and gates the pipeline.
+#
+# Install surface note (INT-02): the only advertised install paths are the
+# single-file agent download (curl -O https://denpex.com/agent/denpex.py) and the
+# published denpex-sdk Python package. No other Denpex package is published, so
+# this Action uses the curl download exclusively and the CI gate always resolves.
+name: 'Denpex Preflight Check'
+description: 'Run a Denpex pre-launch check (preflight / checkpoint validation / version compatibility) as a CI/CD gate.'
 author: 'Denpex'
+
 branding:
-  icon: 'activity'
-  color: 'red'
+  icon: 'shield'
+  color: 'purple'
 
 inputs:
-  api-key:
-    description: 'Your Denpex API Key (leave empty for test drive mode)'
+  check:
+    description: 'Which Denpex check to run as the gate: preflight | preflight-deep | check-versions | validate-checkpoint. preflight-deep adds the NCCL topology lint (GPU→NIC affinity, PCIe ACS, NCCL env vs fabric, memlock) — most useful on self-hosted GPU runners.'
+    required: false
+    default: 'preflight'
+  checkpoint-dir:
+    description: 'Checkpoint directory. Passed to preflight (--checkpoint-dir) as an optional extra check, and REQUIRED (as the positional path) for validate-checkpoint.'
     required: false
     default: ''
-  logs-file:
-    description: 'Path (relative to the workspace) of the training log to diagnose'
+  agent-url:
+    description: 'URL of the single-file Denpex agent to download. Override only for air-gapped/self-hosted mirrors.'
     required: false
-    default: 'training.log'
+    default: 'https://denpex.com/agent/denpex.py'
+  python-version:
+    description: 'Python version to set up for the check (agent needs Python 3.8+).'
+    required: false
+    default: '3.x'
+  working-directory:
+    description: 'Directory the check runs in, so relative checkpoint paths resolve against it.'
+    required: false
+    default: '.'
 
 runs:
-  using: 'node20'
-  main: 'diagnose.js'
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Download the Denpex agent
+      shell: bash
+      env:
+        AGENT_URL: ${{ inputs.agent-url }}
+      run: |
+        set -euo pipefail
+        AGENT_PATH="${RUNNER_TEMP:-/tmp}/denpex.py"
+        echo "Downloading the single-file Denpex agent from ${AGENT_URL}"
+        # Corrected install path (INT-02): single-file curl download, not a pip package.
+        curl -fsSL -o "${AGENT_PATH}" "${AGENT_URL}"
+        echo "DENPEX_AGENT_PATH=${AGENT_PATH}" >> "${GITHUB_ENV}"
+
+    - name: Run Denpex check
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CHECK: ${{ inputs.check }}
+        CKPT_DIR: ${{ inputs.checkpoint-dir }}
+      run: |
+        set -euo pipefail
+        AGENT_PATH="${DENPEX_AGENT_PATH}"
+        case "${CHECK}" in
+          preflight)
+            if [ -n "${CKPT_DIR}" ]; then
+              python "${AGENT_PATH}" preflight --checkpoint-dir "${CKPT_DIR}"
+            else
+              python "${AGENT_PATH}" preflight
+            fi
+            ;;
+          preflight-deep)
+            # Deep NCCL topology lint on top of the standard preflight: GPU→NIC
+            # affinity, PCIe ACS, NCCL env validated against the runner's real
+            # fabric, memlock limits. Run this on self-hosted GPU runners.
+            if [ -n "${CKPT_DIR}" ]; then
+              python "${AGENT_PATH}" preflight --deep --checkpoint-dir "${CKPT_DIR}"
+            else
+              python "${AGENT_PATH}" preflight --deep
+            fi
+            ;;
+          check-versions)
+            python "${AGENT_PATH}" check-versions
+            ;;
+          validate-checkpoint)
+            if [ -z "${CKPT_DIR}" ]; then
+              echo "::error::validate-checkpoint requires the 'checkpoint-dir' input"
+              exit 1
+            fi
+            python "${AGENT_PATH}" validate-checkpoint "${CKPT_DIR}"
+            ;;
+          *)
+            echo "::error::unknown check '${CHECK}' (expected: preflight | preflight-deep | check-versions | validate-checkpoint)"
+            exit 1
+            ;;
+        esac
