@@ -20,7 +20,7 @@ branding:
 
 inputs:
   check:
-    description: 'Which Denpex check to run as the gate: preflight | preflight-deep | check-versions | validate-checkpoint. preflight-deep adds the NCCL topology lint (GPU→NIC affinity, PCIe ACS, NCCL env vs fabric, memlock) — most useful on self-hosted GPU runners.'
+    description: 'Which Denpex check to run as the gate: preflight | preflight-deep | check-versions | validate-checkpoint. preflight-deep adds the NCCL topology lint (GPU→NIC affinity, PCIe ACS, NCCL env vs the real fabric, memlock) and needs a runner that can see the GPUs.'
     required: false
     default: 'preflight'
   checkpoint-dir:
@@ -80,7 +80,7 @@ runs:
           preflight-deep)
             # Deep NCCL topology lint on top of the standard preflight: GPU→NIC
             # affinity, PCIe ACS, NCCL env validated against the runner's real
-            # fabric, memlock limits. Run this on self-hosted GPU runners.
+            # fabric, memlock limits. Needs a runner that can see the GPUs.
             if [ -n "${CKPT_DIR}" ]; then
               python "${AGENT_PATH}" preflight --deep --checkpoint-dir "${CKPT_DIR}"
             else
