@@ -5,8 +5,9 @@
 # Zero build required: runs on the public python:3.12-slim image and fetches the
 # (stdlib-only) daemon script from denpex.com at startup — no private registry.
 #
-#   1. Replace YOUR_DENPEX_API_KEY_HERE below (key: denpex.com dashboard -> API Keys)
-#   2. kubectl apply -f https://denpex.com/agent/daemonset.yaml
+#   1. kubectl create namespace kube-system --dry-run=client -o yaml | kubectl apply -f -
+#   2. kubectl -n kube-system create secret generic denpex-secret --from-literal=api-key=dpx_YOUR_KEY
+#   3. kubectl apply -f https://denpex.com/agent/daemonset.yaml
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -34,8 +35,66 @@ spec:
         imagePullPolicy: IfNotPresent
         command: ["/bin/sh", "-c"]
         args:
+          # ── LAUNCH AUDIT: this fetched and exec'd an UNVERIFIED script ─────────
+          # The old one-liner was `urlretrieve(...) && exec python /tmp/...`. That
+          # runs whatever bytes came back, as root-equivalent (CAP_SYSLOG, host
+          # /dev/kmsg, host /var/log), on every node in the cluster, on every pod
+          # restart. urlretrieve also follows redirects and does not verify that the
+          # response was complete — a truncated body would simply run as a shorter
+          # program. We publish SHA256SUMS precisely so users do not have to trust the
+          # transport; not checking it here made our own bootstrap the weakest
+          # consumer of our own integrity manifest.
+          #
+          # Now: fetch the script AND the checksum manifest, verify, and only then exec.
+          # If verification fails the pod exits non-zero and CrashLoopBackOff makes the
+          # failure visible, instead of silently running an unexpected program.
+          #
+          # Trust boundary, stated plainly: the manifest travels the same TLS channel as
+          # the script, so this does NOT defend against an attacker who controls the
+          # origin and can rewrite both. What it DOES catch is the realistic set — a
+          # truncated or partially-written CDN object, a stale edge cache serving a
+          # half-deployed script, a redirect to the wrong artifact, and any tampering
+          # that reaches one path but not the other. For a hard guarantee, pin the
+          # digest yourself: set DENPEX_DAEMON_SHA256 to the value you verified out of
+          # band and it is enforced instead of the fetched manifest.
+          #
+          # Air-gapped / no-egress clusters: bake the script into an image (see
+          # kubernetes/Dockerfile) and replace this whole `args` block with
+          # `["python", "/opt/denpex/denpex-daemon.py"]`.
           - |
-            python -c "import urllib.request as u; u.urlretrieve('https://denpex.com/agent/kubernetes/denpex-daemon.py', '/tmp/denpex-daemon.py')" && exec python /tmp/denpex-daemon.py
+            set -eu
+            python - <<'PY'
+            import hashlib, os, sys, urllib.request
+            base = os.environ.get("DENPEX_AGENT_BASE", "https://denpex.com/agent")
+            def get(path, timeout=30):
+                req = urllib.request.Request(base + path, headers={"User-Agent": "denpex-daemonset"})
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    return r.read()
+            pinned = (os.environ.get("DENPEX_DAEMON_SHA256") or "").strip().lower()
+            try:
+                script = get("/kubernetes/denpex-daemon.py")
+                sums = "" if pinned else get("/SHA256SUMS").decode("utf-8", "replace")
+            except Exception as e:
+                print("[denpex] could not fetch daemon or checksum manifest: %s" % e, file=sys.stderr)
+                sys.exit(1)
+            want = pinned or None
+            for line in ("" if pinned else sums).splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[1].lstrip("*") == "kubernetes/denpex-daemon.py":
+                    want = parts[0].strip().lower()
+                    break
+            if not want:
+                print("[denpex] SHA256SUMS has no entry for kubernetes/denpex-daemon.py — refusing to run unverified code", file=sys.stderr)
+                sys.exit(1)
+            got = hashlib.sha256(script).hexdigest()
+            if got != want:
+                print("[denpex] checksum mismatch for denpex-daemon.py\n  expected %s\n  got      %s\nRefusing to execute." % (want, got), file=sys.stderr)
+                sys.exit(1)
+            with open("/tmp/denpex-daemon.py", "wb") as f:
+                f.write(script)
+            print("[denpex] denpex-daemon.py verified (sha256 %s)" % got[:16], file=sys.stderr)
+            PY
+            exec python /tmp/denpex-daemon.py
         resources:
           requests:
             cpu: 25m
@@ -52,26 +111,50 @@ spec:
             secretKeyRef:
               name: denpex-secret
               key: api-key
+        # ── WO-2.3: THE FIX THAT MAKES THIS DAEMONSET DO ANYTHING ──────────────
+        # This pod mounted /var/log read-only with no privileged, no CAP_SYSLOG and no
+        # /dev/kmsg. On COS, Amazon Linux 2023, RHEL 9 or any journald-only image there
+        # IS no /var/log/kern.log, so it fell through to `dmesg`, which returns EPERM
+        # under the default kernel.dmesg_restrict=1 — and the exception was swallowed.
+        # The result was a ten-second loop that did nothing, forever, silently: no
+        # error, no log line, no alert, on a fleet the customer believed was monitored.
+        #
+        # CAP_SYSLOG + /dev/kmsg is the minimum that actually reads the kernel ring
+        # buffer, and it is deliberately preferred over `privileged: true` — this
+        # collector only ever READS, so it should not hold rights it cannot use. If your
+        # PodSecurity policy blocks added capabilities, swap the securityContext below
+        # for `privileged: true`; nothing else needs to change.
+        securityContext:
+          # Reads the kernel ring buffer. Without it /dev/kmsg returns EPERM.
+          capabilities:
+            add: ["SYSLOG"]
+          # Read-only collector: it observes and ships. Remediation goes through the
+          # governed pipeline on the server, with a human in it — never from here.
+          readOnlyRootFilesystem: false
+          allowPrivilegeEscalation: false
         volumeMounts:
+        - name: kmsg
+          mountPath: /dev/kmsg
+          readOnly: true
         - name: varlog
           mountPath: /var/log
           readOnly: true
         - name: runlog
           mountPath: /run/log
           readOnly: true
+      # hostPID lets the collector see per-GPU compute processes, which is what the
+      # WO-3.9 idleness precondition reads before any GPU reset is allowed.
+      hostPID: true
       volumes:
+      # The only kernel-log route that works on a hardened host. Listed first because
+      # the collector tries it first, for exactly that reason.
+      - name: kmsg
+        hostPath:
+          path: /dev/kmsg
+          type: CharDevice
       - name: varlog
         hostPath:
           path: /var/log
       - name: runlog
         hostPath:
           path: /run/log
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: denpex-secret
-  namespace: kube-system
-type: Opaque
-stringData:
-  api-key: "YOUR_DENPEX_API_KEY_HERE"

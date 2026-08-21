@@ -1,28 +1,63 @@
-# Denpex — GitHub Action (INT-04)
+# Denpex — GitHub Action
 #
-# A drop-in CI/CD gate that runs a Denpex pre-launch check on a GitHub runner.
-# It downloads the single-file Denpex agent (the SAME zero-dependency agent you
-# install on a training node) and runs one of its local, no-network, no-API-key
-# checks. The agent exits non-zero when it finds a blocker, which fails the job
-# and gates the pipeline.
+# Two jobs, one action:
 #
-# Install surface note (INT-02): the only advertised install paths are the
-# single-file agent download (curl -O https://denpex.com/agent/denpex.py) and the
-# published denpex-sdk Python package. No other Denpex package is published, so
-# this Action uses the curl download exclusively and the CI gate always resolves.
-name: 'Denpex Preflight Check'
-description: 'Run a Denpex pre-launch check (preflight / checkpoint validation / version compatibility) as a CI/CD gate.'
+#   * DIAGNOSE a failed training run. Add it with `if: failure()` and it reads the
+#     crash log, tells you the root cause and the fix, and prints them in the
+#     Actions console. Works with no API key (3 free runs/day per IP).
+#
+#   * GATE a pipeline before launch. `preflight`, `preflight-deep`,
+#     `check-versions` and `validate-checkpoint` all exit non-zero on a blocker,
+#     which fails the job.
+#
+# Both run the SAME single-file agent you install on a training node
+# (curl -O https://denpex.com/agent/denpex.py). There is no separate package to
+# install and nothing to configure beyond the inputs below.
+#
+# ── Why `check` defaults to `auto` ───────────────────────────────────────────
+# This action shipped with a README describing diagnosis and an action.yml that
+# only ever ran preflight — `logs-file` and `api-key` were not even declared, so
+# anyone following the quickstart passed inputs the action ignored and got a
+# preflight check after their job had already failed. `auto` repairs that without
+# breaking anyone: it diagnoses when there is a log to diagnose, and falls back to
+# preflight when there is not, which is what the old default did.
+name: 'Denpex - diagnose ML training failures'
+description: 'Diagnose a failed training run, or gate a pipeline with a pre-launch check. Root cause and fix, printed in the Actions console.'
 author: 'Denpex'
 
 branding:
-  icon: 'shield'
+  icon: 'activity'
   color: 'purple'
 
 inputs:
   check:
-    description: 'Which Denpex check to run as the gate: preflight | preflight-deep | check-versions | validate-checkpoint. preflight-deep adds the NCCL topology lint (GPU→NIC affinity, PCIe ACS, NCCL env vs the real fabric, memlock) and needs a runner that can see the GPUs.'
+    description: >-
+      auto (default) | diagnose | preflight | preflight-deep | check-versions | validate-checkpoint.
+      `auto` diagnoses when `logs-file` exists and holds a log, otherwise runs preflight.
+      `diagnose` reads a crash log and prints the root cause and fix.
+      `preflight-deep` adds the NCCL topology lint (GPU-to-NIC affinity, PCIe ACS, NCCL env vs the
+      real fabric, memlock) and needs a runner that can see the GPUs.
     required: false
-    default: 'preflight'
+    default: 'auto'
+  api-key:
+    description: >-
+      Your Denpex API key. Optional - without it, diagnosis uses the zero-signup test drive
+      (3 runs/day per IP). With it, the diagnosis is attributed to your account and alerts route
+      to your configured Slack/PagerDuty/webhook channels.
+    required: false
+    default: ''
+  logs-file:
+    description: >-
+      Path (relative to working-directory) of the training log to diagnose. If it is missing or
+      empty, common fallbacks are tried: training.log, train.log, nohup.out.
+    required: false
+    default: 'training.log'
+  fail-on-diagnosis:
+    description: >-
+      Whether a successful diagnosis should fail the step. Default false: the job that produced
+      the log has already failed, and failing again hides the diagnosis behind a red step.
+    required: false
+    default: 'false'
   checkpoint-dir:
     description: 'Checkpoint directory. Passed to preflight (--checkpoint-dir) as an optional extra check, and REQUIRED (as the positional path) for validate-checkpoint.'
     required: false
@@ -31,14 +66,26 @@ inputs:
     description: 'URL of the single-file Denpex agent to download. Override only for air-gapped/self-hosted mirrors.'
     required: false
     default: 'https://denpex.com/agent/denpex.py'
+  verify-checksum:
+    description: >-
+      Verify the downloaded agent against the published SHA256SUMS before running it. Default true.
+      Set false only for a mirror that does not publish a manifest - you are then executing
+      unverified code on your runner.
+    required: false
+    default: 'true'
   python-version:
     description: 'Python version to set up for the check (agent needs Python 3.8+).'
     required: false
     default: '3.x'
   working-directory:
-    description: 'Directory the check runs in, so relative checkpoint paths resolve against it.'
+    description: 'Directory the check runs in, so relative log and checkpoint paths resolve against it.'
     required: false
     default: '.'
+
+outputs:
+  diagnosed:
+    description: 'true when a log was found and diagnosed; false when the run was a preflight gate or no log was found.'
+    value: ${{ steps.denpex.outputs.diagnosed }}
 
 runs:
   using: 'composite'
@@ -48,29 +95,102 @@ runs:
       with:
         python-version: ${{ inputs.python-version }}
 
-    - name: Download the Denpex agent
+    - name: Download and verify the Denpex agent
       shell: bash
       env:
         AGENT_URL: ${{ inputs.agent-url }}
+        VERIFY: ${{ inputs.verify-checksum }}
       run: |
         set -euo pipefail
-        AGENT_PATH="${RUNNER_TEMP:-/tmp}/denpex.py"
+        AGENT_DIR="${RUNNER_TEMP:-/tmp}"
+        AGENT_PATH="${AGENT_DIR}/denpex.py"
         echo "Downloading the single-file Denpex agent from ${AGENT_URL}"
-        # Corrected install path (INT-02): single-file curl download, not a pip package.
         curl -fsSL -o "${AGENT_PATH}" "${AGENT_URL}"
+
+        # Verify before executing. denpex.com publishes SHA256SUMS beside the
+        # agent; running unverified code fetched over the network on a runner
+        # that holds your secrets is a supply-chain risk worth one curl.
+        if [ "${VERIFY}" = "true" ]; then
+          SUMS_URL="${AGENT_URL%/*}/SHA256SUMS"
+          if curl -fsSL -o "${AGENT_DIR}/SHA256SUMS" "${SUMS_URL}"; then
+            ( cd "${AGENT_DIR}" && grep ' \*\?denpex\.py$' SHA256SUMS > denpex.py.sha256 \
+              && sha256sum -c denpex.py.sha256 )
+            echo "Agent checksum verified against ${SUMS_URL}"
+          else
+            echo "::error::Could not fetch ${SUMS_URL} to verify the agent. Refusing to execute unverified code. Set verify-checksum: false to override."
+            exit 1
+          fi
+        else
+          echo "::warning::verify-checksum is false - running an unverified agent."
+        fi
         echo "DENPEX_AGENT_PATH=${AGENT_PATH}" >> "${GITHUB_ENV}"
 
-    - name: Run Denpex check
+    - name: Run Denpex
+      id: denpex
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
         CHECK: ${{ inputs.check }}
         CKPT_DIR: ${{ inputs.checkpoint-dir }}
+        LOGS_FILE: ${{ inputs.logs-file }}
+        FAIL_ON_DIAGNOSIS: ${{ inputs.fail-on-diagnosis }}
+        DENPEX_API_KEY: ${{ inputs.api-key }}
       run: |
-        set -euo pipefail
+        set -uo pipefail
         AGENT_PATH="${DENPEX_AGENT_PATH}"
-        case "${CHECK}" in
+        echo "diagnosed=false" >> "${GITHUB_OUTPUT}"
+
+        # Find a log worth diagnosing. A log shorter than 20 characters is not a
+        # log, and diagnosing a placeholder produces a made-up answer - worse
+        # than none.
+        find_log() {
+          for candidate in "${LOGS_FILE}" training.log train.log nohup.out; do
+            [ -n "${candidate}" ] || continue
+            if [ -f "${candidate}" ] && [ "$(wc -c < "${candidate}")" -ge 20 ]; then
+              printf '%s' "${candidate}"
+              return 0
+            fi
+          done
+          return 1
+        }
+
+        run_diagnose() {
+          log="$1"
+          echo "Diagnosing ${log} ($(wc -c < "${log}") bytes)"
+          if [ -z "${DENPEX_API_KEY}" ]; then
+            echo "No api-key set - using the zero-signup test drive (3 runs/day per IP)."
+          fi
+          python "${AGENT_PATH}" diagnose "${log}"
+          rc=$?
+          echo "diagnosed=true" >> "${GITHUB_OUTPUT}"
+          if [ "${FAIL_ON_DIAGNOSIS}" = "true" ]; then
+            return "${rc}"
+          fi
+          # The job that produced this log has already failed. Failing again
+          # collapses the diagnosis into a red step nobody expands.
+          return 0
+        }
+
+        RESOLVED="${CHECK}"
+        if [ "${RESOLVED}" = "auto" ]; then
+          if find_log >/dev/null; then
+            RESOLVED="diagnose"
+          else
+            RESOLVED="preflight"
+            echo "No training log found (looked for: ${LOGS_FILE}, training.log, train.log, nohup.out) - running preflight instead."
+          fi
+        fi
+
+        case "${RESOLVED}" in
+          diagnose)
+            if ! LOG_PATH="$(find_log)"; then
+              echo "::error::check is 'diagnose' but no log was found. Looked for: ${LOGS_FILE}, training.log, train.log, nohup.out. Set logs-file to the path your job writes."
+              exit 1
+            fi
+            run_diagnose "${LOG_PATH}"
+            ;;
           preflight)
+            set -e
             if [ -n "${CKPT_DIR}" ]; then
               python "${AGENT_PATH}" preflight --checkpoint-dir "${CKPT_DIR}"
             else
@@ -78,9 +198,10 @@ runs:
             fi
             ;;
           preflight-deep)
-            # Deep NCCL topology lint on top of the standard preflight: GPU→NIC
+            # Deep NCCL topology lint on top of the standard preflight: GPU-to-NIC
             # affinity, PCIe ACS, NCCL env validated against the runner's real
             # fabric, memlock limits. Needs a runner that can see the GPUs.
+            set -e
             if [ -n "${CKPT_DIR}" ]; then
               python "${AGENT_PATH}" preflight --deep --checkpoint-dir "${CKPT_DIR}"
             else
@@ -88,9 +209,11 @@ runs:
             fi
             ;;
           check-versions)
+            set -e
             python "${AGENT_PATH}" check-versions
             ;;
           validate-checkpoint)
+            set -e
             if [ -z "${CKPT_DIR}" ]; then
               echo "::error::validate-checkpoint requires the 'checkpoint-dir' input"
               exit 1
@@ -98,7 +221,7 @@ runs:
             python "${AGENT_PATH}" validate-checkpoint "${CKPT_DIR}"
             ;;
           *)
-            echo "::error::unknown check '${CHECK}' (expected: preflight | preflight-deep | check-versions | validate-checkpoint)"
+            echo "::error::unknown check '${CHECK}' (expected: auto | diagnose | preflight | preflight-deep | check-versions | validate-checkpoint)"
             exit 1
             ;;
         esac
