@@ -1,9 +1,9 @@
-# Denpex node monitor — DaemonSet
+# Denpex node monitor DaemonSet
 # Runs on every node (incl. GPU-tainted ones), tails kernel/system logs for Xid /
 # ECC / driver faults, and ships findings to Denpex for diagnosis + alert routing.
 #
 # Zero build required: runs on the public python:3.12-slim image and fetches the
-# (stdlib-only) daemon script from denpex.com at startup — no private registry.
+# (stdlib-only) daemon script from denpex.com at startup. No private registry.
 #
 #   1. kubectl create namespace kube-system --dry-run=client -o yaml | kubectl apply -f -
 #   2. kubectl -n kube-system create secret generic denpex-secret --from-literal=api-key=dpx_YOUR_KEY
@@ -40,7 +40,7 @@ spec:
           # runs whatever bytes came back, as root-equivalent (CAP_SYSLOG, host
           # /dev/kmsg, host /var/log), on every node in the cluster, on every pod
           # restart. urlretrieve also follows redirects and does not verify that the
-          # response was complete — a truncated body would simply run as a shorter
+          # response was complete. A truncated body would simply run as a shorter
           # program. We publish SHA256SUMS precisely so users do not have to trust the
           # transport; not checking it here made our own bootstrap the weakest
           # consumer of our own integrity manifest.
@@ -51,7 +51,7 @@ spec:
           #
           # Trust boundary, stated plainly: the manifest travels the same TLS channel as
           # the script, so this does NOT defend against an attacker who controls the
-          # origin and can rewrite both. What it DOES catch is the realistic set — a
+          # origin and can rewrite both. What it DOES catch is the realistic set: a
           # truncated or partially-written CDN object, a stale edge cache serving a
           # half-deployed script, a redirect to the wrong artifact, and any tampering
           # that reaches one path but not the other. For a hard guarantee, pin the
@@ -84,7 +84,7 @@ spec:
                     want = parts[0].strip().lower()
                     break
             if not want:
-                print("[denpex] SHA256SUMS has no entry for kubernetes/denpex-daemon.py — refusing to run unverified code", file=sys.stderr)
+                print("[denpex] SHA256SUMS has no entry for kubernetes/denpex-daemon.py. Refusing to run unverified code", file=sys.stderr)
                 sys.exit(1)
             got = hashlib.sha256(script).hexdigest()
             if got != want:
@@ -115,12 +115,12 @@ spec:
         # This pod mounted /var/log read-only with no privileged, no CAP_SYSLOG and no
         # /dev/kmsg. On COS, Amazon Linux 2023, RHEL 9 or any journald-only image there
         # IS no /var/log/kern.log, so it fell through to `dmesg`, which returns EPERM
-        # under the default kernel.dmesg_restrict=1 — and the exception was swallowed.
+        # under the default kernel.dmesg_restrict=1, and the exception was swallowed.
         # The result was a ten-second loop that did nothing, forever, silently: no
         # error, no log line, no alert, on a fleet the customer believed was monitored.
         #
         # CAP_SYSLOG + /dev/kmsg is the minimum that actually reads the kernel ring
-        # buffer, and it is deliberately preferred over `privileged: true` — this
+        # buffer, and it is deliberately preferred over `privileged: true`. This
         # collector only ever READS, so it should not hold rights it cannot use. If your
         # PodSecurity policy blocks added capabilities, swap the securityContext below
         # for `privileged: true`; nothing else needs to change.
@@ -129,10 +129,12 @@ spec:
           capabilities:
             add: ["SYSLOG"]
           # Read-only collector: it observes and ships. Remediation goes through the
-          # governed pipeline on the server, with a human in it — never from here.
-          readOnlyRootFilesystem: false
+          # governed pipeline on the server, with a human in it. Never from here.
+          readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false
         volumeMounts:
+        - name: tmp
+          mountPath: /tmp
         - name: kmsg
           mountPath: /dev/kmsg
           readOnly: true
@@ -146,6 +148,8 @@ spec:
       # WO-3.9 idleness precondition reads before any GPU reset is allowed.
       hostPID: true
       volumes:
+      - name: tmp
+        emptyDir: {}
       # The only kernel-log route that works on a hardened host. Listed first because
       # the collector tries it first, for exactly that reason.
       - name: kmsg

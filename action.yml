@@ -1,10 +1,11 @@
-# Denpex — GitHub Action
+# Denpex GitHub Action
 #
 # Two jobs, one action:
 #
 #   * DIAGNOSE a failed training run. Add it with `if: failure()` and it reads the
 #     crash log, tells you the root cause and the fix, and prints them in the
-#     Actions console. Works with no API key (3 free runs/day per IP).
+#     Actions console. The first no-key diagnosis is frictionless; CI needs an
+#     API key after that because it cannot complete a browser challenge.
 #
 #   * GATE a pipeline before launch. `preflight`, `preflight-deep`,
 #     `check-versions` and `validate-checkpoint` all exit non-zero on a blocker,
@@ -16,7 +17,7 @@
 #
 # ── Why `check` defaults to `auto` ───────────────────────────────────────────
 # This action shipped with a README describing diagnosis and an action.yml that
-# only ever ran preflight — `logs-file` and `api-key` were not even declared, so
+# only ever ran preflight. `logs-file` and `api-key` were not even declared, so
 # anyone following the quickstart passed inputs the action ignored and got a
 # preflight check after their job had already failed. `auto` repairs that without
 # breaking anyone: it diagnoses when there is a log to diagnose, and falls back to
@@ -41,9 +42,9 @@ inputs:
     default: 'auto'
   api-key:
     description: >-
-      Your Denpex API key. Optional - without it, diagnosis uses the zero-signup test drive
-      (3 runs/day per IP). With it, the diagnosis is attributed to your account and alerts route
-      to your configured Slack/PagerDuty/webhook channels.
+      Your Denpex API key. Optional for one frictionless no-key diagnosis. Later anonymous
+      diagnoses require a browser check that CI cannot complete. With a key, the diagnosis is
+      attributed to your account and alerts route to your configured Slack/PagerDuty/webhook channels.
     required: false
     default: ''
   logs-file:
@@ -140,13 +141,12 @@ runs:
         AGENT_PATH="${DENPEX_AGENT_PATH}"
         echo "diagnosed=false" >> "${GITHUB_OUTPUT}"
 
-        # Find a log worth diagnosing. A log shorter than 20 characters is not a
-        # log, and diagnosing a placeholder produces a made-up answer - worse
-        # than none.
+        # Ignore only files below the six-byte hard floor. The API quality gate
+        # decides whether the admitted text has diagnostic signal.
         find_log() {
           for candidate in "${LOGS_FILE}" training.log train.log nohup.out; do
             [ -n "${candidate}" ] || continue
-            if [ -f "${candidate}" ] && [ "$(wc -c < "${candidate}")" -ge 20 ]; then
+            if [ -f "${candidate}" ] && [ "$(wc -c < "${candidate}")" -ge 6 ]; then
               printf '%s' "${candidate}"
               return 0
             fi
@@ -158,7 +158,7 @@ runs:
           log="$1"
           echo "Diagnosing ${log} ($(wc -c < "${log}") bytes)"
           if [ -z "${DENPEX_API_KEY}" ]; then
-            echo "No api-key set - using the zero-signup test drive (3 runs/day per IP)."
+            echo "No api-key set - the first no-key diagnosis is frictionless; later runs need a Denpex API key."
           fi
           python "${AGENT_PATH}" diagnose "${log}"
           rc=$?
