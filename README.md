@@ -26,7 +26,7 @@ jobs:
         run: python -m torch.distributed.run --nproc_per_node=8 train.py 2>&1 | tee training.log
 
       - name: Diagnose with Denpex
-        uses: MisaMisaAI/denpex-action@v1.0.0
+        uses: Denpex/denpex-action@v1.0.0
         if: failure()
         with:
           # Optional for one frictionless no-key diagnosis. Later CI diagnoses need a key
@@ -42,7 +42,7 @@ Note the `| tee training.log`, the action needs a log on disk to read. It looks 
 
 ```yaml
       - name: Denpex preflight
-        uses: MisaMisaAI/denpex-action@v1.0.0
+        uses: Denpex/denpex-action@v1.0.0
         with:
           check: preflight            # or preflight-deep, check-versions, validate-checkpoint
           checkpoint-dir: ./checkpoints
