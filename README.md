@@ -26,7 +26,7 @@ jobs:
         run: python -m torch.distributed.run --nproc_per_node=8 train.py 2>&1 | tee training.log
 
       - name: Diagnose with Denpex
-        uses: Denpex/denpex-action@v1.0.0
+        uses: Denpex/denpex-action@main
         if: failure()
         with:
           # Optional for one frictionless no-key diagnosis. Later CI diagnoses need a key
@@ -42,7 +42,7 @@ Note the `| tee training.log`, the action needs a log on disk to read. It looks 
 
 ```yaml
       - name: Denpex preflight
-        uses: Denpex/denpex-action@v1.0.0
+        uses: Denpex/denpex-action@main
         with:
           check: preflight            # or preflight-deep, check-versions, validate-checkpoint
           checkpoint-dir: ./checkpoints
@@ -92,6 +92,15 @@ because a GitHub-hosted runner is not your infrastructure.
 
 ## Links
 
-- [Agent documentation](https://denpex.com/docs/agent)
-- [API reference](https://denpex.com/docs/api)
-- [Failure encyclopedia](https://denpex.com/failures)
+| Resource | Description | Link |
+| :--- | :--- | :--- |
+| **Denpex Platform** | Deterministic GPU and ML training failure diagnostics | [denpex.com](https://denpex.com) |
+| **CI & GitHub Action Guide** | Full documentation for CI gates and workflow setup | [denpex.com/docs/ci](https://denpex.com/docs/ci) |
+| **Python Agent & CLI** | On-host monitoring, evidence capture, and zero-egress CLI | [denpex.com/docs/agent](https://denpex.com/docs/agent) |
+| **REST API Reference** | Programmatic `/api/diagnose` and preflight endpoints | [denpex.com/docs/api](https://denpex.com/docs/api) |
+| **VS Code Extension** | Offline GPU crash diagnostics in VS Code | [denpex.com/vscode](https://denpex.com/vscode) |
+| **Open VSX Extension** | Extension for Cursor, Windsurf, VSCodium, and Gitpod | [denpex.com/openvsx](https://denpex.com/openvsx) |
+| **Failure Encyclopedia** | 500+ documented CUDA, NCCL, Xid, Slurm, and vLLM failures | [denpex.com/failures](https://denpex.com/failures) |
+| **Free GPU Tools** | VRAM, NCCL, DeepSpeed ZeRO, and Slurm calculators | [denpex.com/tools](https://denpex.com/tools) |
+| **NVIDIA Xid Reference** | Hardware vs software Xid fault routing table | [denpex.com/xid](https://denpex.com/xid) |
+| **Release Changelog** | Platform, agent, SDK, and extension release notes | [denpex.com/changelog](https://denpex.com/changelog) |
