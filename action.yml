@@ -23,7 +23,7 @@
 # breaking anyone: it diagnoses when there is a log to diagnose, and falls back to
 # preflight when there is not, which is what the old default did.
 name: 'Denpex - diagnose ML training failures'
-description: 'Diagnose a failed training run, or gate a pipeline with a pre-launch check. Root cause and fix, printed in the Actions console.'
+description: 'Diagnose failed ML training runs or gate pipelines with pre-launch GPU checks. Root cause and fix in the Actions log.'
 author: 'Denpex'
 
 branding:
